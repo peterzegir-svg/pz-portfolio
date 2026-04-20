@@ -1,0 +1,643 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8"/>
+<meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=1,user-scalable=no"/>
+<meta name="apple-mobile-web-app-capable" content="yes"/>
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent"/>
+<meta name="apple-mobile-web-app-title" content="PZ Portfolio"/>
+<meta name="theme-color" content="#0f172a"/>
+<title>PZ Portfolio</title>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js"></script>
+<style>
+*{-webkit-tap-highlight-color:transparent;box-sizing:border-box;margin:0;padding:0}
+body{font-family:-apple-system,BlinkMacSystemFont,'SF Pro Display',sans-serif;background:#f0f4f8;min-height:100vh;overscroll-behavior:none}
+</style>
+</head>
+<body>
+<div id="app"></div>
+<script>
+const FX={USD:0.7425,EUR:0.8682,GBP:1,HKD:0.0957,SGD:0.5541,CHF:0.666,NOK:0.0693,AUD:0.4655};
+const toGBP=(v,ccy)=>(v||0)*(FX[ccy]||1);
+const CONVICTION=['GOOGL','TSM','AVGO','TT','ITW','EMR','NOVN','V','PWR','DG','AIA','CRH'];
+const ACTION_COLORS={HOLD:'#0ea5e9',ADD:'#16a34a',TRIM:'#d97706',CULL:'#dc2626',REVIEW:'#7c3aed'};
+const FALLBACK={EGLN:95.54,NOVN:117.42,FCX:68.28,DBS:61.04,CSX:42.72,MOWI:212.4,GOOGL:336.02,TSM:363.35,CRH:117.89,NVDA:198.35,AMZN:249.7,AVGO:398.47,MSFT:420.26,META:676.87,LLY:903.99,SYK:338.38,TMO:516,V:315.1,ITW:265.61,TT:460.27,FTNT:82.4,MCD:306.96,SU:267.75,EMR:140.37,NDIA:8.905,DG:134.6,PWR:587.42,ERAN:5.0515,WEBN:11.678,WCOG:18.202,CDNS:306.96,ASML:1222.6};
+
+// Symbol → clean ticker mapping
+const SYM_MAP={
+  'ASML.AS':'ASML','EGLN.L':'EGLN','ERAN.L':'ERAN','SCHN.PA':'SU',
+  'NOVN.S':'NOVN','WCOG.S':'WCOG','BHP.AX':'BHP','WEBN.DE':'WEBN',
+  '1299.HK':'AIA','MOWI.OL':'MOWI','NVDA.O':'NVDA','MSFT.O':'MSFT',
+  'META.O':'META','ISNDIA.L':'NDIA','FTNT.O':'FTNT','DBSM.SI':'DBS',
+  'CSX.O':'CSX','AVGO.O':'AVGO','CDNS.O':'CDNS','AMZN.O':'AMZN',
+  'GOOGL.O':'GOOGL','SGEF.PA':'DG','TMO.O':'TMO',
+  // already clean
+  'PWR':'PWR','V':'V','TT':'TT','TSM':'TSM','TMO':'TMO','SYK':'SYK',
+  'ITW':'ITW','EMR':'EMR','LLY':'LLY','MCD':'MCD','CRH':'CRH',
+  'GOOGL':'GOOGL','AVGO':'AVGO','AMZN':'AMZN','CDNS':'CDNS','NVDA':'NVDA',
+  'MSFT':'MSFT','META':'META','CSX':'CSX','FTNT':'FTNT','ASML':'ASML',
+  'NOVN':'NOVN','WEBN':'WEBN','WCOG':'WCOG','EGLN':'EGLN','ERAN':'ERAN'
+};
+const CCY_MAP={ASML:'EUR',EGLN:'EUR',ERAN:'GBP',SU:'EUR',DG:'EUR',NOVN:'CHF',WCOG:'USD',BHP:'AUD',WEBN:'EUR',AIA:'HKD',MOWI:'NOK',NDIA:'USD',DBS:'SGD',GOOGL:'USD',TSM:'USD',AVGO:'USD',NVDA:'USD',AMZN:'USD',MSFT:'USD',META:'USD',LLY:'USD',SYK:'USD',TMO:'USD',V:'USD',ITW:'USD',TT:'USD',EMR:'USD',MCD:'USD',CSX:'USD',CRH:'USD',CDNS:'USD',FTNT:'USD',PWR:'USD'};
+const SECTOR_MAP={GOOGL:'Technology',TSM:'Technology',AVGO:'Technology',NVDA:'Technology',AMZN:'Technology',MSFT:'Technology',META:'Technology',FTNT:'Technology',CDNS:'Technology',ASML:'Technology',WEBN:'Global Eq',NDIA:'EM Equity',CRH:'Materials',BHP:'Materials',TT:'Industrials',ITW:'Industrials',EMR:'Industrials',PWR:'Industrials',CSX:'Industrials',DG:'Industrials',SU:'Industrials',LLY:'Healthcare',SYK:'Healthcare',TMO:'Healthcare',NOVN:'Healthcare',V:'Financials',DBS:'Financials',AIA:'Financials',MCD:'Consumer',MOWI:'Consumer',EGLN:'Commodity',WCOG:'Commodity',ERAN:'Fixed Income'};
+
+let state={
+  tab:'upload',positions:[],
+  cash:{dpm:{gbp:0,eur:0,usd:0,hkd:0},xo:{gbp:0,eur:53826,usd:0},dryPowder:373000},
+  vix:19.12,vixDays:0,
+  uploadStatus:'idle',uploadLog:[],pasteStatus:'',
+  screenTicker:'',screenResult:null,screenLoading:false,screenError:'',
+  rebalResult:null,rebalLoading:false,
+  sortBy:'pl',
+  specPositions:[{ticker:'RKLB',name:'Rocket Lab USA',theme:'Space Launch',notes:'Small launch + Neutron. ISA sleeve.'}],
+  specTicker:'',specTheme:'Drones',
+};
+
+const posVal=p=>toGBP(p.price*p.qty,p.ccy);
+const posPL=p=>toGBP((p.price-p.cost)*p.qty,p.ccy);
+const posRet=p=>p.cost?(p.price-p.cost)/p.cost:0;
+const vsMA=p=>p.ma200&&p.price?(p.price-p.ma200)/p.ma200*100:null;
+const fmtPct=v=>v==null?'—':`${v>=0?'+':''}${(v*100).toFixed(1)}%`;
+const fmtPL=v=>{if(v==null)return'—';const k=v/1000;return`${v>=0?'+':'-'}£${Math.abs(k).toFixed(1)}K`;};
+const totVal=()=>state.positions.reduce((s,p)=>s+posVal(p),0);
+const totPL=()=>state.positions.reduce((s,p)=>s+posPL(p),0);
+const gateOpen=()=>state.vix<=20&&state.vixDays>=3;
+
+// ── INVESTING.COM CSV PARSER ─────────────────────────────────────────────────
+function parseInvestingCSV(text) {
+  const lines = text.split('\n');
+  const positions = [];
+  let inSummary = false;
+
+  for (const rawLine of lines) {
+    const line = rawLine.trim();
+    if (!line) continue;
+
+    // Detect section headers
+    if (line.includes('"Open Positions Summary"') || line.includes('"Open Positions"')) {
+      inSummary = true; continue;
+    }
+    if (line.includes('"Closed Positions"') || line.includes('"Market Value"') || line.includes('"Open P/L"') || line.includes('"Closed P/L"')) {
+      continue;
+    }
+    // Skip header row
+    if (line.includes('"Name"') && line.includes('"Symbol"')) continue;
+
+    if (!inSummary) continue;
+
+    // Parse CSV fields
+    const parts = line.split('","').map(p => p.replace(/^"|"$/g, '').trim());
+    if (parts.length < 6) continue;
+
+    // Format: [blank, Name, Symbol, Amount, AvgPrice, CurrentPrice, ...]
+    const name = parts[1];
+    const symbol = parts[2];
+    const qtyStr = parts[3];
+    const costStr = parts[4];
+    const priceStr = parts[5];
+
+    if (!symbol || !qtyStr || symbol === 'Symbol') continue;
+
+    const qty = parseFloat(qtyStr.replace(/,/g, ''));
+    const cost = parseFloat(costStr.replace(/,/g, ''));
+    const price = parseFloat(priceStr.replace(/,/g, ''));
+
+    if (!qty || !cost || !price || isNaN(qty) || isNaN(cost) || isNaN(price)) continue;
+    if (qty > 1e7) continue; // skip bad rows
+
+    const ticker = SYM_MAP[symbol] || symbol.split('.')[0].toUpperCase();
+    const ccy = CCY_MAP[ticker] || 'USD';
+    const sector = SECTOR_MAP[ticker] || 'Other';
+    const bucket = ticker==='ERAN'?'safety':['EGLN','WCOG'].includes(ticker)?'insurance':'growth';
+
+    // Avoid duplicates (summary vs open positions sections)
+    if (positions.findIndex(p => p.ticker === ticker) >= 0) continue;
+
+    positions.push({
+      ticker, name: name || ticker, sector, bucket,
+      acct: 'MIXED', qty, cost, price, ccy,
+      ma200: null, action: 'HOLD',
+      conviction: CONVICTION.includes(ticker)
+    });
+  }
+
+  // Fix ERAN qty (investing.com shows weird number)
+  const eranIdx = positions.findIndex(p => p.ticker === 'ERAN');
+  if (eranIdx >= 0 && positions[eranIdx].qty > 100000) {
+    positions[eranIdx].qty = 56900;
+  }
+
+  return positions;
+}
+
+// ── PLAIN TEXT PASTE PARSER (fallback) ───────────────────────────────────────
+function parseInvestingPaste(text) {
+  // Try CSV first
+  if (text.includes('"Symbol"') || text.includes(',"')) {
+    const result = parseInvestingCSV(text);
+    if (result.length > 0) return result;
+  }
+
+  // Fallback: regex on raw text
+  const positions = [];
+  const re = /([A-Z0-9\.]{2,10})\s+([\d,]+\.?\d*)\s+([\d,]+\.?\d*)\s+([\d,]+\.?\d*)/g;
+  let m;
+  while ((m = re.exec(text)) !== null) {
+    const symbol = m[1];
+    const ticker = SYM_MAP[symbol] || symbol.split('.')[0].toUpperCase();
+    const qty = parseFloat(m[2].replace(/,/g,''));
+    const cost = parseFloat(m[3].replace(/,/g,''));
+    const price = parseFloat(m[4].replace(/,/g,''));
+    if (!qty||!cost||!price||qty>1e7) continue;
+    const ccy = CCY_MAP[ticker] || 'USD';
+    if (positions.findIndex(p=>p.ticker===ticker) < 0) {
+      positions.push({ticker, name:ticker, sector:SECTOR_MAP[ticker]||'Other',
+        bucket:ticker==='ERAN'?'safety':['EGLN','WCOG'].includes(ticker)?'insurance':'growth',
+        acct:'MIXED', qty, cost, price, ccy, ma200:null, action:'HOLD',
+        conviction:CONVICTION.includes(ticker)});
+    }
+  }
+  return positions;
+}
+
+// ── EXCEL PARSER ─────────────────────────────────────────────────────────────
+function parseExcel(arrayBuffer) {
+  const wb = XLSX.read(new Uint8Array(arrayBuffer),{type:'array',cellDates:true});
+  const SOLD=new Set(['TENCENT','CRM','NOVO','PANW','HD']);
+  function parseSheet(sheetName, acct) {
+    const ws = wb.Sheets[sheetName]; if(!ws) return [];
+    const rows = XLSX.utils.sheet_to_json(ws,{header:1,defval:null,raw:true});
+    const out=[];
+    let headerRow=-1;
+    for(let i=0;i<15;i++) if(rows[i]&&rows[i][1]&&rows[i][1].toString().trim()==='Ticker'){headerRow=i+1;break;}
+    if(headerRow<0) return [];
+    for(let i=headerRow;i<rows.length;i++){
+      const r=rows[i]; if(!r) continue;
+      const ticker=(r[1]||'').toString().trim();
+      if(!ticker||ticker==='Ticker'||ticker.startsWith('TOTAL')||SOLD.has(ticker)) continue;
+      const qty=parseFloat(r[5])||0; if(!qty) continue;
+      const cost=parseFloat(r[7])||0;
+      const ccy=(r[6]||'USD').toString().trim().toUpperCase();
+      const lp=r[10]; const price=lp&&typeof lp==='number'&&lp>0?lp:(FALLBACK[ticker]||cost);
+      const ma200=parseFloat(r[18])||null;
+      const ar=(r[15]||'').toString().toUpperCase();
+      const action=ar.includes('CULL')||ar.includes('SOLD')?'CULL':ar.includes('TRIM')?'TRIM':ar.includes('ADD')?'ADD':ar.includes('REVIEW')?'REVIEW':'HOLD';
+      const name=(r[2]||ticker).toString().trim();
+      const sector=(r[3]||'Other').toString().trim();
+      const bucket=ticker==='ERAN'||sector==='Fixed Income'?'safety':['EGLN','WCOG'].includes(ticker)?'insurance':'growth';
+      out.push({ticker,name,sector,bucket,acct,qty,cost,price,ccy,ma200,action,conviction:CONVICTION.includes(ticker)});
+    }
+    return out;
+  }
+  const dpm=wb.SheetNames.find(n=>n.toLowerCase().includes('dpm'));
+  const xo=wb.SheetNames.find(n=>n.toLowerCase().includes('xo')&&!n.toLowerCase().includes('dpm'));
+  return [...parseSheet(dpm,'DPM'),...parseSheet(xo,'XO')];
+}
+
+// ── AI SCREENER ───────────────────────────────────────────────────────────────
+async function runScreen(ticker) {
+  setState({screenLoading:true,screenResult:null,screenError:''});
+  try {
+    const tv=totVal(), gate=gateOpen();
+    const held=state.positions.find(p=>p.ticker.toUpperCase()===ticker.toUpperCase());
+    const ctx=`Portfolio £${(tv/1000).toFixed(0)}K. VIX ${state.vix} (${state.vixDays}/3 ≤20 — gate ${gate?'OPEN':'CLOSED'}).${held?` Already holds ${held.qty} @ ${held.cost} ${held.ccy}.`:' Not held.'}`;
+    const resp=await fetch('https://api.anthropic.com/v1/messages',{method:'POST',headers:{'Content-Type':'application/json','x-api-key':'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','anthropic-version':'2023-06-01','anthropic-dangerous-direct-browser-access':'true'},body:JSON.stringify({
+      model:'claude-sonnet-4-20250514',max_tokens:2000,
+      messages:[{role:'user',content:`You are a senior analyst for Peter Zegir, 71, UK tax resident, growth portfolio ~£1.8M. Use your training knowledge to analyse this stock. 6-factor framework: (1) Buffett moat (2) FCF yield vs 10Y (3) price vs MA200 (4) MA50/MA200 cross (5) VIX gate (6) volume. ${ctx}\n\nAnalyse ${ticker.toUpperCase()}. You MUST respond with ONLY a valid JSON object, no other text before or after:\n{"ticker":"${ticker.toUpperCase()}","name":"Full company name","price":123.45,"ma200":110.0,"verdict":"BUY","confidence":75,"thesis":"2-3 sentence thesis here","risks":["Risk 1","Risk 2","Risk 3"],"entryPrice":115.0,"targetPrice":145.0,"positionSizeGBP":20000,"factors":{"moat":{"score":4,"max":5,"note":"explanation"},"fcfYield":{"score":3,"max":5,"value":"3.2%","note":"explanation"},"vsMA200":{"score":4,"max":5,"value":"+8%","note":"explanation"},"maCross":{"score":3,"max":5,"note":"explanation"},"vixGate":{"score":${gate?5:1},"max":5,"note":"explanation"},"volume":{"score":3,"max":5,"note":"explanation"}},"portfolioFit":"portfolio fit note","taxNote":"CGT/TRF note"}`}]
+    })});
+    const data=await resp.json();
+    if(data.error) throw new Error(data.error.message||'API error');
+    const txt=(data.content||[]).filter(x=>x.type==='text').map(x=>x.text).join('');
+    const clean=txt.replace(/```json|```/g,'').trim();
+    const match=clean.match(/\{[\s\S]*\}/);
+    if(!match) throw new Error('No JSON found in response');
+    setState({screenResult:JSON.parse(match[0]),screenLoading:false});
+  } catch(e) {
+    setState({screenError:'Error: '+e.message,screenLoading:false});
+  }
+}
+
+async function runRebal() {
+  setState({rebalLoading:true,rebalResult:null});
+  try {
+    const tv=totVal();
+    const safety=state.positions.filter(p=>p.bucket==='safety').reduce((s,p)=>s+posVal(p),0);
+    const growth=state.positions.filter(p=>p.bucket==='growth').reduce((s,p)=>s+posVal(p),0);
+    const ins=state.positions.filter(p=>p.bucket==='insurance').reduce((s,p)=>s+posVal(p),0);
+    const sectors=Object.entries(state.positions.reduce((acc,p)=>{acc[p.sector]=(acc[p.sector]||0)+posVal(p);return acc},{})).sort((a,b)=>b[1]-a[1]).map(([k,v])=>`${k}:${(v/tv*100).toFixed(0)}%`).join(', ');
+    const resp=await fetch('https://api.anthropic.com/v1/messages',{method:'POST',headers:{'Content-Type':'application/json','x-api-key':'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','anthropic-version':'2023-06-01','anthropic-dangerous-direct-browser-access':'true'},body:JSON.stringify({
+      model:'claude-sonnet-4-20250514',max_tokens:1500,
+      messages:[{role:'user',content:`Portfolio strategist for Peter Zegir, 71, UK tax resident, growth + lifestyle income. Portfolio £${(tv/1000).toFixed(0)}K. Safety ${(safety/tv*100).toFixed(0)}%, Growth ${(growth/tv*100).toFixed(0)}%, Insurance ${(ins/tv*100).toFixed(0)}%. Sectors: ${sectors}. VIX ${state.vix}. Dry powder €373K.\n\nReturn ONLY valid JSON:\n{"targetSplit":{"safety":15,"growth":75,"insurance":10},"rationale":"2 sentences","riskScore":6,"riskLabel":"Moderately Aggressive Growth","alerts":[{"type":"CONCENTRATION","severity":"HIGH","message":"alert"}],"actions":[{"ticker":"XXX","action":"TRIM","amount":"£20K","reason":"reason","priority":1}],"summary":"3 sentences portfolio health"}`}]
+    })});
+    const data=await resp.json();
+    const txt=(data.content||[]).filter(x=>x.type==='text').map(x=>x.text).join('');
+    const match=txt.match(/\{[\s\S]*\}/);
+    if(!match) throw new Error('Parse error');
+    setState({rebalResult:JSON.parse(match[0]),rebalLoading:false});
+  } catch(e) { setState({rebalLoading:false}); }
+}
+
+function setState(patch){Object.assign(state,patch);render();}
+
+// ── RENDER ────────────────────────────────────────────────────────────────────
+function render(){
+  document.getElementById('app').innerHTML=`
+    <div style="font-family:-apple-system,BlinkMacSystemFont,'SF Pro Display',sans-serif;background:#f0f4f8;min-height:100vh;max-width:600px;margin:0 auto;padding-bottom:100px">
+      ${renderHeader()}${renderTabs()}
+      ${state.tab==='upload'?renderUpload():''}
+      ${state.tab==='cash'?renderCash():''}
+      ${state.tab==='screen'?renderScreen():''}
+      ${state.tab==='portfolio'?renderPortfolio():''}
+      ${state.tab==='rebalance'?renderRebalance():''}
+      ${state.tab==='speculative'?renderSpeculative():''}
+    </div>`;
+  attachEvents();
+}
+
+function renderHeader(){
+  const gate=gateOpen(), col=gate?'#16a34a':state.vix<=20?'#d97706':'#dc2626', tv=totVal();
+  return `<div style="background:linear-gradient(135deg,#0f172a 0%,#1e3a5f 100%);padding:20px 20px 16px;color:#fff">
+    <div style="font-size:19px;font-weight:800;letter-spacing:-0.5px;margin-bottom:2px">Peter Zegir · Portfolio AI</div>
+    <div style="font-size:11px;color:#64748b;margin-bottom:12px">UBP Jersey · XO 6914196 · DPM 6914202</div>
+    <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap">
+      <div style="background:${col}22;border:1px solid ${col}55;border-radius:8px;padding:6px 12px;display:flex;gap:8px;align-items:center">
+        <span style="font-size:10px;color:#94a3b8">VIX</span>
+        <input id="vixInput" type="number" step="0.01" value="${state.vix}" style="width:52px;background:transparent;border:none;color:${col};font-size:14px;font-weight:800;font-family:inherit;outline:none"/>
+        <span style="font-size:10px;color:${col};font-weight:700">${gate?'GATE OPEN':state.vix<=20?`${state.vixDays}/3 days`:'CLOSED'}</span>
+      </div>
+      <div style="display:flex;gap:4px">
+        ${[0,1,2,3].map(d=>`<button onclick="setVixDays(${d})" style="width:28px;height:28px;border-radius:6px;border:1px solid ${state.vixDays===d?col:'#1e3a5f'};background:${state.vixDays===d?col+'33':'transparent'};color:${state.vixDays===d?col:'#475569'};cursor:pointer;font-size:11px;font-weight:700">${d}</button>`).join('')}
+      </div>
+      <span style="font-size:9px;color:#475569">days ≤20</span>
+      ${tv>0?`<span style="margin-left:auto;font-size:11px;color:#4ade80;font-weight:700">£${(tv/1000).toFixed(0)}K</span>`:''}
+    </div>
+  </div>`;
+}
+
+function renderTabs(){
+  const tabs=[{id:'upload',label:'📤 Upload'},{id:'cash',label:'💵 Cash'},{id:'screen',label:'🔍 Screener'},{id:'portfolio',label:'📊 Holdings'},{id:'rebalance',label:'⚖️ Rebalance'},{id:'speculative',label:'🚀 Speculative'}];
+  return `<div style="display:flex;background:#fff;border-bottom:1px solid #e2e8f0;position:sticky;top:0;z-index:100;overflow-x:auto;-webkit-overflow-scrolling:touch">
+    ${tabs.map(t=>`<button onclick="setTab('${t.id}')" style="flex-shrink:0;padding:13px 14px;border:none;background:none;font-size:11px;font-weight:${state.tab===t.id?700:400};color:${state.tab===t.id?'#0f172a':'#94a3b8'};border-bottom:${state.tab===t.id?'2px solid #0f172a':'2px solid transparent'};cursor:pointer;font-family:inherit">${t.label}</button>`).join('')}
+  </div>`;
+}
+
+function renderUpload(){
+  const sm={idle:'',reading:'Reading file…',parsing:'Extracting positions…',done:'✓ Portfolio updated',error:'Could not read file — try again'};
+  const sc={done:'#16a34a',error:'#dc2626',reading:'#0ea5e9',parsing:'#0ea5e9'};
+  return `<div style="padding:16px 16px 0">
+
+    <!-- GREEN INVESTING.COM BOX -->
+    <div style="background:#f0fdf4;border:2px solid #22c55e;border-radius:16px;padding:18px 16px;margin-bottom:12px">
+      <div style="font-size:13px;font-weight:800;color:#15803d;margin-bottom:6px">📈 Paste Investing.com CSV — Live Prices</div>
+      <div style="font-size:11px;color:#166534;margin-bottom:10px;line-height:1.6">
+        On investing.com: go to your Portfolio → click <b>Export</b> (or select all &amp; copy) → paste below.<br>
+        Also works if you just copy-paste the table directly from the page.
+      </div>
+      <textarea id="investingPaste" placeholder="Paste CSV or copied table from investing.com here…&#10;&#10;Example line:&#10;&quot;&quot;,&quot;Alphabet A&quot;,&quot;GOOGL.O&quot;,&quot;225&quot;,&quot;240.82&quot;,&quot;341.68&quot;,..." 
+        style="width:100%;box-sizing:border-box;height:120px;background:#fff;border:1.5px solid #86efac;border-radius:10px;padding:10px 12px;font-size:11px;font-family:monospace;outline:none;resize:none;color:#374151"></textarea>
+      ${state.pasteStatus?`<div style="margin-top:6px;font-size:12px;font-weight:600;color:${state.pasteStatus.startsWith('✓')?'#16a34a':'#dc2626'}">${state.pasteStatus}</div>`:''}
+      <button onclick="processPaste()" style="margin-top:8px;background:#16a34a;color:#fff;border:none;border-radius:10px;padding:11px 20px;font-size:13px;font-weight:700;cursor:pointer;font-family:inherit;width:100%">Load Live Prices →</button>
+    </div>
+
+    <!-- FILE UPLOAD -->
+    <div id="dropZone" style="border:2px dashed #cbd5e1;border-radius:16px;padding:24px 20px;text-align:center;background:#f8fafc;cursor:pointer;margin-bottom:12px">
+      <input id="fileInput" type="file" accept=".xlsx,.xls,.csv,.pdf,.png,.jpg,.jpeg" style="display:none"/>
+      <div style="font-size:28px;margin-bottom:8px">📊</div>
+      <div style="font-size:14px;font-weight:700;color:#374151;margin-bottom:4px">Or upload Excel / PDF / Screenshot</div>
+      <div style="font-size:11px;color:#94a3b8;margin-bottom:12px">Master workbook · UBP statement · Photo</div>
+      ${sm[state.uploadStatus]?`<div style="font-size:12px;font-weight:600;color:${sc[state.uploadStatus]||'#0ea5e9'};margin-bottom:8px">${sm[state.uploadStatus]}</div>`:''}
+      <div style="background:#0f172a;color:#fff;border-radius:10px;padding:9px 20px;display:inline-block;font-size:12px;font-weight:700">${state.uploadStatus==='reading'||state.uploadStatus==='parsing'?'Processing…':'Choose File'}</div>
+    </div>
+
+    ${state.uploadLog.length>0?`<div style="background:#fff;border-radius:16px;padding:16px;margin-bottom:12px;box-shadow:0 1px 3px rgba(0,0,0,0.06)">
+      <div style="font-size:11px;font-weight:700;color:#64748b;letter-spacing:1px;text-transform:uppercase;margin-bottom:10px">History</div>
+      ${state.uploadLog.slice(0,5).map(l=>`<div style="padding:8px 0;border-bottom:1px solid #f8fafc">
+        <div style="display:flex;justify-content:space-between"><span style="font-size:12px;font-weight:700">${l.file}</span><span style="font-size:10px;color:${l.status==='ok'?'#16a34a':'#dc2626'}">${l.status==='ok'?'✓':'✗'}</span></div>
+        <div style="font-size:11px;color:#94a3b8">${l.msg}</div>
+      </div>`).join('')}
+    </div>`:''}
+
+    ${state.positions.length===0?`<div style="background:#eff6ff;border:1px solid #bfdbfe;border-radius:16px;padding:14px;font-size:12px;color:#1e40af;line-height:1.7">💡 <b>No portfolio loaded.</b> Paste your investing.com CSV above, or upload your Excel workbook.</div>`:''}
+  </div>`;
+}
+
+function renderCash(){
+  const gate=gateOpen(), col=gate?'#16a34a':'#d97706';
+  const cashGBP=acc=>Object.entries(state.cash[acc]||{}).reduce((s,[c,v])=>s+toGBP(v,c.toUpperCase()),0);
+  const total=cashGBP('dpm')+cashGBP('xo');
+  return `<div style="padding:16px 16px 0">
+    <div style="background:linear-gradient(135deg,#0f172a,#1e3a5f);color:#fff;border-radius:16px;padding:18px 16px;margin-bottom:12px">
+      <div style="font-size:11px;color:#64748b;letter-spacing:1px;margin-bottom:6px">TOTAL CASH POSITION</div>
+      <div style="font-size:32px;font-weight:900;margin-bottom:4px">£${(total/1000).toFixed(1)}K</div>
+      <div style="padding:10px 14px;background:${gate?'#166534':'#92400e'}33;border-radius:10px;font-size:12px;font-weight:600;color:${gate?'#4ade80':'#fbbf24'}">
+        ${gate?'✓ VIX gate open — cash eligible for deployment':`✗ VIX gate closed (${state.vixDays}/3 days) — hold all cash`}
+      </div>
+    </div>
+    ${['dpm','xo'].map(acct=>{
+      const bal=state.cash[acct]||{};
+      const gbpEq=cashGBP(acct);
+      return `<div style="background:#fff;border-radius:16px;padding:18px 16px;margin-bottom:12px;border-left:4px solid #0ea5e9;box-shadow:0 1px 3px rgba(0,0,0,0.06)">
+        <div style="display:flex;justify-content:space-between;align-items:flex-start;margin-bottom:12px">
+          <div><div style="font-size:13px;font-weight:700">${acct.toUpperCase()} Account</div><div style="font-size:10px;color:#94a3b8">${acct==='dpm'?'6914202':'6914196'} · UBP Jersey</div></div>
+          <div style="font-size:22px;font-weight:900">£${(gbpEq/1000).toFixed(1)}K</div>
+        </div>
+        <div style="display:grid;grid-template-columns:1fr 1fr;gap:8px">
+          ${['GBP','EUR','USD','HKD'].map(c=>`<div>
+            <div style="font-size:10px;color:#94a3b8;margin-bottom:3px">${c}</div>
+            <input type="number" value="${bal[c.toLowerCase()]||0}" onchange="updateCash('${acct}','${c.toLowerCase()}',this.value)" style="width:100%;background:#f8fafc;border:1px solid #e2e8f0;border-radius:8px;padding:8px 10px;font-size:13px;font-family:inherit;outline:none"/>
+          </div>`).join('')}
+        </div>
+      </div>`;
+    }).join('')}
+    <div style="background:#fff;border-radius:16px;padding:18px 16px;margin-bottom:12px;box-shadow:0 1px 3px rgba(0,0,0,0.06)">
+      <div style="font-size:11px;font-weight:700;color:#64748b;letter-spacing:1px;text-transform:uppercase;margin-bottom:8px">Dry Powder</div>
+      <div style="font-size:28px;font-weight:900;color:#d97706;margin-bottom:4px">€${(state.cash.dryPowder/1000).toFixed(0)}K</div>
+      <div style="font-size:11px;color:#94a3b8">Must not deploy until VIX ≤20 for 3 consecutive sessions</div>
+      <input type="number" value="${state.cash.dryPowder}" onchange="updateDryPowder(this.value)" style="margin-top:10px;width:100%;background:#f8fafc;border:1px solid #e2e8f0;border-radius:8px;padding:8px 10px;font-size:13px;font-family:inherit;outline:none"/>
+    </div>
+  </div>`;
+}
+
+function renderScreen(){
+  const r=state.screenResult;
+  return `<div style="padding:16px 16px 0">
+    <div style="background:#fff;border-radius:16px;padding:18px 16px;margin-bottom:12px;box-shadow:0 1px 3px rgba(0,0,0,0.06)">
+      <div style="font-size:11px;font-weight:700;color:#64748b;letter-spacing:1px;text-transform:uppercase;margin-bottom:12px">AI Stock Screener — 6-Factor Framework</div>
+      <input id="screenInput" type="text" placeholder="Enter ticker (e.g. MCO, GEV, COST…)" value="${state.screenTicker}" style="width:100%;box-sizing:border-box;background:#f8fafc;border:1.5px solid #e2e8f0;border-radius:12px;padding:13px 16px;font-size:15px;outline:none;font-family:inherit;margin-bottom:10px"/>
+      <button onclick="doScreen()" style="background:#0f172a;color:#fff;border:none;border-radius:12px;padding:13px 20px;font-size:14px;font-weight:700;cursor:pointer;font-family:inherit;width:100%">${state.screenLoading?'⏳ Analysing…':'Run 6-Factor Analysis →'}</button>
+      ${state.screenError?`<div style="margin-top:10px;font-size:12px;color:#dc2626">${state.screenError}</div>`:''}
+    </div>
+    ${state.screenLoading?`<div style="background:#fff;border-radius:16px;padding:40px;text-align:center"><div style="font-size:36px;margin-bottom:10px">🔍</div><div style="font-size:15px;font-weight:700;margin-bottom:6px">Analysing ${state.screenTicker}…</div><div style="font-size:12px;color:#94a3b8">Searching live data · Running 6-factor check</div></div>`:''}
+    ${r&&!state.screenLoading?renderScreenResult(r):''}
+  </div>`;
+}
+
+function renderScreenResult(r){
+  const vc={BUY:{bg:'#dcfce7',c:'#16a34a'},WATCH:{bg:'#dbeafe',c:'#2563eb'},WAIT:{bg:'#fef9c3',c:'#ca8a04'},AVOID:{bg:'#fee2e2',c:'#dc2626'}}[r.verdict]||{bg:'#fef9c3',c:'#ca8a04'};
+  const nc=vc.c;
+  const f=r.factors||{};
+  const ts=Object.values(f).reduce((s,x)=>s+(x.score||0),0);
+  const tm=Object.values(f).reduce((s,x)=>s+(x.max||5),0);
+  const fl={'moat':'1. Buffett Moat','fcfYield':'2. FCF Yield vs 10Y','vsMA200':'3. vs MA200','maCross':'4. MA50/MA200 Cross','vixGate':'5. VIX Gate','volume':'6. Volume'};
+  return `<div style="background:#fff;border-radius:16px;padding:18px 16px;margin-bottom:12px;border-left:4px solid ${nc};box-shadow:0 1px 3px rgba(0,0,0,0.06)">
+    <div style="display:flex;justify-content:space-between;align-items:flex-start;margin-bottom:14px">
+      <div><div style="font-size:26px;font-weight:900">${r.ticker}</div><div style="font-size:12px;color:#64748b">${r.name||''}</div></div>
+      <div style="background:${vc.bg};color:${vc.c};border-radius:10px;padding:4px 14px;font-size:13px;font-weight:800">${r.verdict}</div>
+    </div>
+    <div style="display:grid;grid-template-columns:1fr 1fr 1fr;gap:10px;margin-bottom:12px">
+      ${[['Price',r.price?`$${r.price.toFixed(2)}`:'—','#0f172a'],['MA200',r.ma200?`$${r.ma200.toFixed(0)}`:'—','#64748b'],['Score',`${ts}/${tm}`,nc]].map(([l,v,c])=>`<div style="background:#f8fafc;border-radius:12px;padding:14px;text-align:center"><div style="font-size:18px;font-weight:800;color:${c}">${v}</div><div style="font-size:10px;color:#94a3b8;margin-top:2px">${l}</div></div>`).join('')}
+    </div>
+    <div style="height:8px;background:#f1f5f9;border-radius:4px;overflow:hidden"><div style="height:100%;width:${tm?ts/tm*100:0}%;background:${nc};border-radius:4px"></div></div>
+    <div style="font-size:10px;color:#94a3b8;margin-top:4px;text-align:right">Confidence: ${r.confidence||0}%</div>
+  </div>
+  <div style="background:#fff;border-radius:16px;padding:18px 16px;margin-bottom:12px;box-shadow:0 1px 3px rgba(0,0,0,0.06)">
+    <div style="font-size:11px;font-weight:700;color:#64748b;letter-spacing:1px;text-transform:uppercase;margin-bottom:12px">6-Factor Breakdown</div>
+    ${Object.entries(fl).map(([k,label])=>{
+      const fx=f[k]; if(!fx) return '';
+      const pct=fx.score/fx.max*100;
+      const col=pct>=80?'#16a34a':pct>=60?'#0ea5e9':pct>=40?'#d97706':'#dc2626';
+      return `<div style="padding:10px 0;border-bottom:1px solid #f1f5f9">
+        <div style="display:flex;justify-content:space-between;margin-bottom:4px"><span style="font-size:12px;font-weight:600;color:#374151">${label}</span><span style="font-size:11px;color:#94a3b8">${fx.value||`${fx.score}/${fx.max}`}</span></div>
+        <div style="height:8px;background:#f1f5f9;border-radius:4px;overflow:hidden;margin-bottom:3px"><div style="height:100%;width:${pct}%;background:${col};border-radius:4px"></div></div>
+        <div style="font-size:10px;color:#94a3b8">${fx.note||''}</div>
+      </div>`;
+    }).join('')}
+  </div>
+  <div style="background:#fff;border-radius:16px;padding:18px 16px;margin-bottom:12px;box-shadow:0 1px 3px rgba(0,0,0,0.06)">
+    <div style="font-size:11px;font-weight:700;color:#64748b;letter-spacing:1px;text-transform:uppercase;margin-bottom:10px">Investment Thesis</div>
+    <p style="font-size:13px;color:#374151;line-height:1.7;margin:0">${r.thesis||''}</p>
+  </div>
+  <div style="background:#f0fdf4;border-radius:16px;padding:18px 16px;margin-bottom:12px">
+    <div style="font-size:11px;font-weight:700;color:#64748b;letter-spacing:1px;text-transform:uppercase;margin-bottom:10px">Entry Parameters</div>
+    <div style="display:grid;grid-template-columns:1fr 1fr;gap:10px">
+      ${[['Entry',r.entryPrice?`$${r.entryPrice.toFixed(0)}`:'—'],['Target',r.targetPrice?`$${r.targetPrice.toFixed(0)}`:'—'],['Size',r.positionSizeGBP?`£${(r.positionSizeGBP/1000).toFixed(0)}K`:'—'],['Confidence',r.confidence?`${r.confidence}%`:'—']].map(([l,v])=>`<div style="background:#fff;border-radius:12px;padding:14px;text-align:center"><div style="font-size:18px;font-weight:800">${v}</div><div style="font-size:10px;color:#94a3b8;margin-top:2px">${l}</div></div>`).join('')}
+    </div>
+  </div>
+  <div style="background:#fff;border-radius:16px;padding:18px 16px;margin-bottom:12px;box-shadow:0 1px 3px rgba(0,0,0,0.06)">
+    <div style="font-size:11px;font-weight:700;color:#64748b;letter-spacing:1px;text-transform:uppercase;margin-bottom:10px">Key Risks</div>
+    ${(r.risks||[]).map(risk=>`<div style="display:flex;gap:10px;padding:8px 0;border-bottom:1px solid #f1f5f9"><span>⚠️</span><span style="font-size:12px;color:#374151;line-height:1.5">${risk}</span></div>`).join('')}
+  </div>
+  ${r.portfolioFit?`<div style="background:#fff;border-radius:16px;padding:18px 16px;margin-bottom:12px;box-shadow:0 1px 3px rgba(0,0,0,0.06)">
+    <div style="font-size:11px;font-weight:700;color:#64748b;letter-spacing:1px;text-transform:uppercase;margin-bottom:8px">Portfolio Fit</div>
+    <p style="font-size:12px;color:#374151;line-height:1.6;margin:0">${r.portfolioFit}</p>
+    ${r.taxNote?`<p style="font-size:11px;color:#94a3b8;margin-top:8px;padding:8px 12px;background:#f8fafc;border-radius:8px">🇬🇧 ${r.taxNote}</p>`:''}
+  </div>`:''}`;
+}
+
+function renderPortfolio(){
+  if(state.positions.length===0) return `<div style="padding:16px"><div style="background:#fff;border-radius:16px;padding:40px;text-align:center">
+    <div style="font-size:36px;margin-bottom:10px">📊</div>
+    <div style="font-size:15px;font-weight:700;margin-bottom:6px">No portfolio loaded</div>
+    <div style="font-size:12px;color:#94a3b8;margin-bottom:16px">Paste investing.com CSV or upload Excel</div>
+    <button onclick="setTab('upload')" style="background:#0f172a;color:#fff;border:none;border-radius:12px;padding:13px 20px;font-size:14px;font-weight:700;cursor:pointer;font-family:inherit">Go to Upload →</button>
+  </div></div>`;
+  const tv=totVal(), tpl=totPL();
+  const sorted=[...state.positions].sort((a,b)=>
+    state.sortBy==='pl'?posRet(b)-posRet(a):state.sortBy==='ma'?(vsMA(b)||0)-(vsMA(a)||0):state.sortBy==='val'?posVal(b)-posVal(a):a.ticker.localeCompare(b.ticker));
+  return `<div style="padding:16px 16px 0">
+    <div style="background:#fff;border-radius:16px;padding:18px 16px;margin-bottom:12px;box-shadow:0 1px 3px rgba(0,0,0,0.06)">
+      <div style="display:grid;grid-template-columns:1fr 1fr 1fr;gap:10px;margin-bottom:14px">
+        ${[['Value',`£${(tv/1000).toFixed(0)}K`,'#0f172a'],['P&L',fmtPL(tpl),tpl>=0?'#16a34a':'#dc2626'],['Positions',state.positions.length,'#0ea5e9']].map(([l,v,c])=>`<div style="background:#f8fafc;border-radius:12px;padding:14px;text-align:center"><div style="font-size:22px;font-weight:800;color:${c}">${v}</div><div style="font-size:10px;color:#94a3b8;margin-top:2px">${l}</div></div>`).join('')}
+      </div>
+      ${[['Safety','#0ea5e9'],['Growth','#16a34a'],['Insurance','#f59e0b']].map(([b,c])=>{
+        const bv=state.positions.filter(p=>p.bucket===b.toLowerCase()).reduce((s,p)=>s+posVal(p),0);
+        return `<div style="margin-bottom:8px">
+          <div style="display:flex;justify-content:space-between;margin-bottom:3px"><span style="font-size:11px;font-weight:600">${b}</span><span style="font-size:11px;color:#94a3b8">${tv?(bv/tv*100).toFixed(0):0}% · £${(bv/1000).toFixed(0)}K</span></div>
+          <div style="height:8px;background:#f1f5f9;border-radius:4px;overflow:hidden"><div style="height:100%;width:${tv?bv/tv*100:0}%;background:${c};border-radius:4px"></div></div>
+        </div>`;
+      }).join('')}
+    </div>
+    <div style="display:flex;gap:6px;margin-bottom:12px;flex-wrap:wrap">
+      ${[['pl','P&L %'],['ma','vs MA200'],['val','Value'],['az','A–Z']].map(([k,l])=>`<button onclick="setSortBy('${k}')" style="background:${state.sortBy===k?'#0f172a':'#fff'};color:${state.sortBy===k?'#fff':'#64748b'};border:1px solid ${state.sortBy===k?'#0f172a':'#e2e8f0'};border-radius:8px;padding:7px 12px;font-size:11px;font-weight:600;cursor:pointer;font-family:inherit">${l}</button>`).join('')}
+    </div>
+    <div style="background:#fff;border-radius:16px;padding:6px 16px;box-shadow:0 1px 3px rgba(0,0,0,0.06)">
+      ${sorted.map(p=>{
+        const ret=posRet(p), ma=vsMA(p), ac=ACTION_COLORS[p.action]||'#64748b';
+        return `<div style="display:flex;justify-content:space-between;align-items:center;padding:12px 0;border-bottom:1px solid #f8fafc">
+          <div style="flex:1">
+            <div style="display:flex;align-items:center;gap:6px;margin-bottom:2px">
+              <span style="font-size:13px;font-weight:800;color:#0f172a">${p.ticker}</span>
+              ${p.conviction?'<span style="font-size:11px">⭐</span>':''}
+              <span style="background:${ac}14;color:${ac};border-radius:6px;padding:2px 8px;font-size:10px;font-weight:700">${p.action}</span>
+              <span style="font-size:9px;color:#cbd5e1">${p.acct}</span>
+            </div>
+            <div style="font-size:10px;color:#94a3b8">${(p.name||'').substring(0,26)} · ${p.price} ${p.ccy}</div>
+          </div>
+          <div style="text-align:right">
+            <div style="font-size:13px;font-weight:700;color:${ret>=0?'#16a34a':'#dc2626'}">${fmtPct(ret)}</div>
+            <div style="font-size:10px;color:${ma==null?'#cbd5e1':ma>=0?'#16a34a':'#dc2626'}">${ma!=null?`${ma>=0?'▲':'▼'}MA ${Math.abs(ma).toFixed(1)}%`:'—'}</div>
+          </div>
+        </div>`;
+      }).join('')}
+    </div>
+    <div style="font-size:10px;color:#94a3b8;text-align:center;padding:10px 0">⭐ = Conviction hold · never sell without thesis review</div>
+  </div>`;
+}
+
+function renderRebalance(){
+  const r=state.rebalResult;
+  return `<div style="padding:16px 16px 0">
+    <div style="background:#fff;border-radius:16px;padding:18px 16px;margin-bottom:12px;box-shadow:0 1px 3px rgba(0,0,0,0.06)">
+      <div style="font-size:11px;font-weight:700;color:#64748b;letter-spacing:1px;text-transform:uppercase;margin-bottom:12px">AI Rebalancing Engine</div>
+      ${state.positions.length===0?`<div style="text-align:center;padding:20px 0"><div style="font-size:13px;color:#94a3b8;margin-bottom:12px">Upload your portfolio first</div><button onclick="setTab('upload')" style="background:#0f172a;color:#fff;border:none;border-radius:12px;padding:13px 20px;font-size:14px;font-weight:700;cursor:pointer;font-family:inherit">Go to Upload →</button></div>`:
+      `<button onclick="doRebal()" style="background:#0f172a;color:#fff;border:none;border-radius:12px;padding:13px 20px;font-size:14px;font-weight:700;cursor:pointer;font-family:inherit;width:100%">${state.rebalLoading?'⏳ Generating plan…':'Generate Rebalancing Plan →'}</button>`}
+    </div>
+    ${state.rebalLoading?`<div style="background:#fff;border-radius:16px;padding:40px;text-align:center"><div style="font-size:36px;margin-bottom:10px">⚖️</div><div style="font-size:15px;font-weight:700">Analysing allocation…</div></div>`:''}
+    ${r&&!state.rebalLoading?`
+      <div style="background:#fff;border-radius:16px;padding:18px 16px;margin-bottom:12px;box-shadow:0 1px 3px rgba(0,0,0,0.06)">
+        <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:12px">
+          <div><div style="font-size:18px;font-weight:800">${r.riskLabel||''}</div><div style="font-size:11px;color:#94a3b8">Risk ${r.riskScore||0}/10</div></div>
+          <div style="font-size:11px;color:#64748b;text-align:right"><div>Safety: <b>${(r.targetSplit||{}).safety||0}%</b></div><div>Growth: <b style="color:#16a34a">${(r.targetSplit||{}).growth||0}%</b></div><div>Insurance: <b>${(r.targetSplit||{}).insurance||0}%</b></div></div>
+        </div>
+        <p style="font-size:12px;color:#374151;line-height:1.6;margin:0">${r.rationale||''}</p>
+      </div>
+      <div style="background:#eff6ff;border-radius:16px;padding:18px 16px;margin-bottom:12px"><p style="font-size:13px;color:#1e40af;line-height:1.7;margin:0">${r.summary||''}</p></div>
+      ${(r.alerts||[]).length>0?`<div style="background:#fff;border-radius:16px;padding:18px 16px;margin-bottom:12px;box-shadow:0 1px 3px rgba(0,0,0,0.06)">
+        <div style="font-size:11px;font-weight:700;color:#64748b;letter-spacing:1px;text-transform:uppercase;margin-bottom:12px">Alerts</div>
+        ${r.alerts.map(a=>`<div style="display:flex;gap:10px;padding:10px 0;border-bottom:1px solid #f1f5f9">
+          <span>${a.severity==='HIGH'?'🔴':a.severity==='MEDIUM'?'🟡':'🔵'}</span>
+          <div><div style="font-size:10px;font-weight:700;color:${a.severity==='HIGH'?'#dc2626':a.severity==='MEDIUM'?'#d97706':'#0ea5e9'};margin-bottom:2px">${a.type} · ${a.severity}</div><div style="font-size:12px;color:#374151;line-height:1.5">${a.message}</div></div>
+        </div>`).join('')}
+      </div>`:''}
+      ${(r.actions||[]).length>0?`<div style="background:#fff;border-radius:16px;padding:18px 16px;margin-bottom:12px;box-shadow:0 1px 3px rgba(0,0,0,0.06)">
+        <div style="font-size:11px;font-weight:700;color:#64748b;letter-spacing:1px;text-transform:uppercase;margin-bottom:12px">Priority Actions</div>
+        ${r.actions.sort((a,b)=>a.priority-b.priority).map((a,i)=>`<div style="display:flex;gap:12px;padding:12px 0;border-bottom:1px solid #f8fafc;align-items:flex-start">
+          <div style="width:24px;height:24px;border-radius:12px;background:#f1f5f9;display:flex;align-items:center;justify-content:center;font-size:11px;font-weight:800;color:#64748b;flex-shrink:0">${i+1}</div>
+          <div><div style="display:flex;gap:8px;align-items:center;margin-bottom:3px"><span style="font-size:14px;font-weight:800">${a.ticker}</span><span style="background:${ACTION_COLORS[a.action]||'#64748b'}14;color:${ACTION_COLORS[a.action]||'#64748b'};border-radius:6px;padding:2px 8px;font-size:10px;font-weight:700">${a.action}</span><span style="font-size:11px;font-weight:600;color:#374151">${a.amount||''}</span></div><div style="font-size:11px;color:#94a3b8">${a.reason||''}</div></div>
+        </div>`).join('')}
+      </div>`:''}
+    `:''}
+  </div>`;
+}
+
+function renderSpeculative(){
+  const grouped=state.specPositions.reduce((acc,p)=>{(acc[p.theme]=acc[p.theme]||[]).push(p);return acc},{});
+  return `<div style="padding:16px 16px 0">
+    <div style="background:linear-gradient(135deg,#1e3a5f,#0f172a);color:#fff;border-radius:16px;padding:18px 16px;margin-bottom:12px">
+      <div style="font-size:11px;color:#64748b;letter-spacing:1px;margin-bottom:6px">SPECULATIVE SLEEVE</div>
+      <div style="font-size:28px;font-weight:900;margin-bottom:2px">£0 <span style="font-size:14px;color:#64748b;font-weight:400">/ £180K cap</span></div>
+      <div style="font-size:11px;color:#64748b">10% of portfolio · ISA + XO eligible · Not DPM core</div>
+    </div>
+    <div style="background:#fff;border-radius:16px;padding:18px 16px;margin-bottom:12px;box-shadow:0 1px 3px rgba(0,0,0,0.06)">
+      <div style="font-size:11px;font-weight:700;color:#64748b;letter-spacing:1px;text-transform:uppercase;margin-bottom:12px">Add Position</div>
+      <input id="specTicker" type="text" placeholder="Ticker (e.g. KTOS, AVAV, ACHR)" value="${state.specTicker}" style="width:100%;box-sizing:border-box;background:#f8fafc;border:1.5px solid #e2e8f0;border-radius:12px;padding:12px 16px;font-size:14px;outline:none;font-family:inherit;margin-bottom:8px"/>
+      <input id="specTheme" type="text" placeholder="Theme (e.g. Drones, Space, Photonics)" value="${state.specTheme}" style="width:100%;box-sizing:border-box;background:#f8fafc;border:1.5px solid #e2e8f0;border-radius:12px;padding:12px 16px;font-size:14px;outline:none;font-family:inherit;margin-bottom:12px"/>
+      <div style="display:flex;gap:8px">
+        <button onclick="addSpec()" style="background:#7c3aed;color:#fff;border:none;border-radius:12px;padding:12px 16px;font-size:13px;font-weight:700;cursor:pointer;font-family:inherit;flex:2">Add to Sleeve</button>
+        <button onclick="screenSpec()" style="background:transparent;color:#0ea5e9;border:1.5px solid #0ea5e9;border-radius:12px;padding:12px 16px;font-size:13px;font-weight:700;cursor:pointer;font-family:inherit;flex:1">Screen →</button>
+      </div>
+    </div>
+    ${Object.entries(grouped).map(([theme,positions])=>`<div style="background:#fff;border-radius:16px;padding:18px 16px;margin-bottom:12px;box-shadow:0 1px 3px rgba(0,0,0,0.06)">
+      <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:12px">
+        <div style="font-size:11px;font-weight:700;color:#64748b;letter-spacing:1px;text-transform:uppercase">${theme}</div>
+        <div style="background:#7c3aed18;color:#7c3aed;border-radius:20px;padding:3px 10px;font-size:10px;font-weight:700">${positions.length} position${positions.length!==1?'s':''}</div>
+      </div>
+      ${positions.map(p=>`<div style="display:flex;justify-content:space-between;align-items:center;padding:10px 0;border-bottom:1px solid #f8fafc">
+        <div><div style="font-size:14px;font-weight:800">${p.ticker}</div><div style="font-size:11px;color:#94a3b8">${p.notes||''}</div></div>
+        <button onclick="screenSpecTicker('${p.ticker}')" style="background:transparent;color:#0f172a;border:1.5px solid #0f172a;border-radius:10px;padding:7px 14px;font-size:11px;font-weight:700;cursor:pointer;font-family:inherit">Screen →</button>
+      </div>`).join('')}
+    </div>`).join('')}
+    <div style="background:#fefce8;border:1px solid #fde68a;border-radius:16px;padding:16px;margin-bottom:12px">
+      <div style="font-size:11px;font-weight:700;color:#854d0e;margin-bottom:6px">⚠️ Sleeve Rules</div>
+      <div style="font-size:11px;color:#713f12;line-height:1.8">• Max 10% of total portfolio (£180K cap)<br>• ISA or XO only — not DPM core<br>• Max £20–30K per single name<br>• No CGT in ISA wrapper</div>
+    </div>
+  </div>`;
+}
+
+function attachEvents(){
+  const vi=document.getElementById('vixInput');
+  if(vi) vi.onchange=e=>setState({vix:parseFloat(e.target.value)||0});
+  const dz=document.getElementById('dropZone'), fi=document.getElementById('fileInput');
+  if(dz&&fi){
+    dz.onclick=()=>fi.click();
+    dz.ondragover=e=>e.preventDefault();
+    dz.ondrop=e=>{e.preventDefault();e.dataTransfer.files[0]&&handleFile(e.dataTransfer.files[0]);};
+    fi.onchange=e=>e.target.files[0]&&handleFile(e.target.files[0]);
+  }
+  const si=document.getElementById('screenInput');
+  if(si){si.onchange=e=>state.screenTicker=e.target.value.toUpperCase();si.onkeydown=e=>{if(e.key==='Enter'&&state.screenTicker)doScreen();};}
+}
+
+window.setTab=t=>setState({tab:t});
+window.setVixDays=d=>setState({vixDays:d});
+window.setSortBy=s=>setState({sortBy:s});
+window.updateCash=(acct,ccy,val)=>{state.cash[acct][ccy]=parseFloat(val)||0;render();};
+window.updateDryPowder=val=>{state.cash.dryPowder=parseFloat(val)||0;render();};
+window.doScreen=()=>{
+  const si=document.getElementById('screenInput');
+  const t=si?si.value.toUpperCase():state.screenTicker;
+  if(t){setState({screenTicker:t});runScreen(t);}
+};
+window.doRebal=()=>runRebal();
+window.processPaste=()=>{
+  const ta=document.getElementById('investingPaste');
+  if(!ta||ta.value.trim().length<20){setState({pasteStatus:'⚠️ Please paste your investing.com data first'});return;}
+  const positions=parseInvestingPaste(ta.value);
+  if(positions.length===0){
+    setState({pasteStatus:'⚠️ Could not detect positions. Make sure you copied the CSV export or the full table from investing.com.'});
+    return;
+  }
+  setState({positions,pasteStatus:`✓ ${positions.length} positions loaded with live prices`,tab:'portfolio',
+    uploadLog:[{file:'investing.com',status:'ok',msg:`${positions.length} positions loaded`,time:new Date},...state.uploadLog]});
+};
+window.addSpec=()=>{
+  const st=document.getElementById('specTicker'), sth=document.getElementById('specTheme');
+  const ticker=st?st.value.toUpperCase():state.specTicker;
+  const theme=sth?sth.value:state.specTheme;
+  if(ticker) setState({specPositions:[...state.specPositions,{ticker,name:ticker,theme:theme||'Other',notes:'Added manually'}],specTicker:''});
+};
+window.screenSpec=()=>{
+  const st=document.getElementById('specTicker');
+  const t=st?st.value.toUpperCase():state.specTicker;
+  if(t){setState({screenTicker:t,tab:'screen'});runScreen(t);}
+};
+window.screenSpecTicker=t=>{setState({screenTicker:t,tab:'screen'});runScreen(t);};
+
+async function handleFile(file){
+  setState({uploadStatus:'reading'});
+  if(file.name.match(/\.(xlsx|xls)$/i)){
+    const buf=await file.arrayBuffer();
+    setState({uploadStatus:'parsing'});
+    try{
+      const positions=parseExcel(buf);
+      if(!positions.length) throw new Error('No positions found');
+      setState({positions,uploadStatus:'done',uploadLog:[{file:file.name,status:'ok',msg:`${positions.length} positions loaded`,time:new Date},...state.uploadLog]});
+      setTimeout(()=>setState({tab:'portfolio'}),800);
+    }catch(e){setState({uploadStatus:'error',uploadLog:[{file:file.name,status:'error',msg:e.message,time:new Date},...state.uploadLog]});}
+  } else if(file.name.match(/\.csv$/i)){
+    const text=await file.text();
+    setState({uploadStatus:'parsing'});
+    try{
+      const positions=parseInvestingCSV(text);
+      if(!positions.length) throw new Error('No positions found in CSV');
+      setState({positions,uploadStatus:'done',uploadLog:[{file:file.name,status:'ok',msg:`${positions.length} positions loaded`,time:new Date},...state.uploadLog]});
+      setTimeout(()=>setState({tab:'portfolio'}),800);
+    }catch(e){setState({uploadStatus:'error',uploadLog:[{file:file.name,status:'error',msg:e.message,time:new Date},...state.uploadLog]});}
+  } else {
+    const reader=new FileReader();
+    reader.onload=async ev=>{
+      try{
+        const b64=ev.target.result.split(',')[1];
+        const isImg=file.type.startsWith('image/');
+        const content=isImg?[{type:'image',source:{type:'base64',media_type:file.type,data:b64}},{type:'text',text:'UBP Jersey statement. Return ONLY JSON: {"positions":[{"ticker":"XXX","qty":100,"price":123.45,"ccy":"USD","cost":100.0}]}'}]:
+          [{type:'document',source:{type:'base64',media_type:'application/pdf',data:b64}},{type:'text',text:'UBP Jersey statement. Return ONLY JSON: {"positions":[{"ticker":"XXX","qty":100,"price":123.45,"ccy":"USD","cost":100.0}]}'}];
+        const resp=await fetch('https://api.anthropic.com/v1/messages',{method:'POST',headers:{'Content-Type':'application/json','x-api-key':'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','anthropic-version':'2023-06-01','anthropic-dangerous-direct-browser-access':'true'},body:JSON.stringify({model:'claude-sonnet-4-20250514',max_tokens:1500,messages:[{role:'user',content}]})});
+        const data=await resp.json();
+        const txt=(data.content||[]).filter(x=>x.type==='text').map(x=>x.text).join('');
+        const match=txt.match(/\{[\s\S]*\}/);
+        if(!match) throw new Error('No data extracted');
+        const parsed=JSON.parse(match[0]);
+        const newPos=(parsed.positions||[]).map(p=>({...p,bucket:'growth',acct:'XO',conviction:CONVICTION.includes(p.ticker),sector:SECTOR_MAP[p.ticker]||'Other',action:'HOLD',ma200:null,name:p.ticker}));
+        if(!newPos.length) throw new Error('No positions found');
+        setState({positions:[...state.positions,...newPos],uploadStatus:'done',uploadLog:[{file:file.name,status:'ok',msg:`${newPos.length} positions extracted`,time:new Date},...state.uploadLog]});
+        setTimeout(()=>setState({tab:'portfolio'}),800);
+      }catch(e){setState({uploadStatus:'error',uploadLog:[{file:file.name,status:'error',msg:e.message,time:new Date},...state.uploadLog]});}
+    };
+    reader.readAsDataURL(file);
+  }
+}
+
+render();
+</script>
+</body>
+</html>
